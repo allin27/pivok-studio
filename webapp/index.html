@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>PÎVOK — Редактор Коллажа</title>
+    <title>PÎVOK — Collage Editor</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="/webapp/fabric.min.js"></script>
     <style>
@@ -24,22 +24,22 @@
     </style>
 </head>
 <body>
-    <div class="header" id="pair-info">PÎVOK — Загрузка...</div>
-    <div class="instruction">Нажмите на фото, двигайте пальцем и меняйте масштаб ползунком.</div>
+    <div class="header" id="pair-info">PÎVOK...</div>
+    <div class="instruction" id="lbl-inst"></div>
 
     <div id="canvas-container">
         <canvas id="c"></canvas>
     </div>
 
     <div class="slider-container" id="zoom-controls" style="display: none;">
-        <div class="slider-label">Масштаб выбранного фото</div>
+        <div class="slider-label" id="lbl-zoom"></div>
         <input type="range" id="zoom-slider" min="0.05" max="1.5" step="0.005" value="0.2">
     </div>
 
     <div class="controls">
-        <button id="btn-prev" class="secondary hidden">⬅️ Назад</button>
-        <button id="btn-swap" class="secondary hidden">⇄ Поменять местами</button>
-        <button id="btn-next" class="hidden">Далее ➡️</button>
+        <button id="btn-prev" class="secondary hidden"></button>
+        <button id="btn-swap" class="secondary hidden"></button>
+        <button id="btn-next" class="hidden"></button>
     </div>
 
     <script>
@@ -49,6 +49,43 @@
         const urlParams = new URLSearchParams(window.location.search);
         const folder = urlParams.get('folder');
         const chatId = urlParams.get('chat_id');
+        const lang = (urlParams.get('lang') || 'ru').toLowerCase() === 'tr' ? 'tr' : 'ru';
+
+        const I18N = {
+            ru: {
+                loading: "PÎVOK — Загрузка...",
+                inst: "Нажмите на фото, двигайте пальцем и меняйте масштаб ползунком.",
+                zoom: "Масштаб выбранного фото",
+                prev: "⬅️ Назад",
+                swap: "⇄ Поменять местами",
+                next: "Далее ➡️",
+                save: "СОХРАНИТЬ КОЛЛАЖ",
+                saving: "Сохранение...",
+                errLoad: "Не удалось загрузить исходники",
+                errPrefix: "Ошибка: ",
+                pairOf: (a, b) => `PÎVOK — Коллаж ${a} из ${b}`
+            },
+            tr: {
+                loading: "PÎVOK — Yükleniyor...",
+                inst: "Fotoğrafa dokunun, parmağınızla kaydırın ve çubukla yakınlaştırın.",
+                zoom: "Seçili fotoğraf ölçeği",
+                prev: "⬅️ Geri",
+                swap: "⇄ Yer Değiştir",
+                next: "İleri ➡️",
+                save: "KOLAJI KAYDET",
+                saving: "Kaydediliyor...",
+                errLoad: "Fotoğraflar yüklenemedi",
+                errPrefix: "Hata: ",
+                pairOf: (a, b) => `PÎVOK — Kolaj ${a} / ${b}`
+            }
+        }[lang];
+
+        document.getElementById('pair-info').innerText = I18N.loading;
+        document.getElementById('lbl-inst').innerText = I18N.inst;
+        document.getElementById('lbl-zoom').innerText = I18N.zoom;
+        document.getElementById('btn-prev').innerText = I18N.prev;
+        document.getElementById('btn-swap').innerText = I18N.swap;
+        document.getElementById('btn-next').innerText = I18N.next;
 
         let canvas = new fabric.Canvas('c', { selection: false, preserveObjectStacking: true });
         let editorData = null;
@@ -64,7 +101,7 @@
         async function init() {
             try {
                 const res = await fetch(`/api/editor/${encodeURIComponent(folder)}`);
-                if (!res.ok) throw new Error("Не удалось загрузить исходники");
+                if (!res.ok) throw new Error(I18N.errLoad);
                 editorData = await res.json();
 
                 const photos = editorData.photos;
@@ -97,13 +134,13 @@
                     renderPair(currentPairIndex);
                 });
             } catch (e) {
-                document.getElementById('pair-info').innerText = "Ошибка: " + e.message;
+                document.getElementById('pair-info').innerText = I18N.errPrefix + e.message;
             }
         }
 
         function renderPair(index) {
             currentPairIndex = index;
-            document.getElementById('pair-info').innerText = `PÎVOK — Коллаж ${index + 1} из ${pairs.length}`;
+            document.getElementById('pair-info').innerText = I18N.pairOf(index + 1, pairs.length);
             canvas.clear();
             photoObjs = [];
 
@@ -245,7 +282,7 @@
             finalImages[currentPairIndex] = cropData;
         }
 
-        tg.MainButton.setText("СОХРАНИТЬ КОЛЛАЖ");
+        tg.MainButton.setText(I18N.save);
         tg.MainButton.color = "#5d0537";
         tg.MainButton.show();
 
@@ -258,13 +295,13 @@
                 }
             }
 
-            tg.MainButton.setText("Сохранение...");
+            tg.MainButton.setText(I18N.saving);
             tg.MainButton.showProgress();
 
             await fetch(`/api/editor/${encodeURIComponent(folder)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ images: finalImages, chat_id: chatId })
+                body: JSON.stringify({ images: finalImages, chat_id: chatId, lang: lang })
             });
 
             tg.MainButton.hideProgress();

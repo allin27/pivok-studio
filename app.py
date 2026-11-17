@@ -1,6 +1,6 @@
 """
-PÎVOK Studio — 24/7 Cloud App (Hugging Face Docker Space, Port 7860)
-Unified FastAPI + Aiogram 3 Bot + WebApp Crop Editor + Embedded YOLOv8 CPU
+PÎVOK Studio — 24/7 Cloud App (Render / Docker, RU + TR Bilingual)
+Unified FastAPI + Aiogram 3 Bot + WebApp Crop Editor + Embedded YOLOv8 ONNX CPU
 """
 
 import asyncio
@@ -13,7 +13,7 @@ import shutil
 import time
 import urllib.parse
 from contextlib import asynccontextmanager
-from typing import Dict
+from typing import Dict, Optional
 
 import cv2
 import numpy as np
@@ -77,10 +77,176 @@ SIZE_LIST = [
     "1-2-3",
     "STD",
 ]
-MAIN_MENU = ["🖼 Создать коллаж"]
 
 PHOTO_BUFFER: Dict[int, dict] = {}
 DOWNLOAD_PREFETCH: Dict[str, asyncio.Task] = {}
+
+# ==========================================
+# RU + TR LOCALIZATION DICTIONARY
+# ==========================================
+
+STRINGS = {
+    "ru": {
+        "btn_create": "🖼 Создать коллаж",
+        "btn_lang": "🇹🇷 Türkçe / Язык",
+        "btn_cancel": "❌ Отмена",
+        "btn_pair_2": "✅ Двойной коллаж (по 2 фото)",
+        "btn_single_1": "✅ Одинарный коллаж (по 1 фото)",
+        "btn_all_loaded": "✅ ВСЕ ФОТО ЗАГРУЖЕНЫ",
+        "btn_group_smart": "🧠 Умная группировка (Авто)",
+        "btn_group_seq": "🔢 По парам (1-2, 3-4)",
+        "btn_confirm_go": "✅ Создать коллажи",
+        "btn_edit_code": "✏️ Изменить Код",
+        "btn_edit_size": "✏️ Изменить Размеры",
+        "btn_edit_price": "✏️ Изменить Цену",
+        "btn_dl_files": "📥 Скачать файлами (без сжатия)",
+        "btn_refresh": "🔄 Обновить превью",
+        "btn_add_color": "🎨 Добавить фото цвета",
+        "btn_delete": "🗑 Удалить",
+        "welcome": "🌸 **PÎVOK Cloud Studio (24/7)**\nВыберите действие в меню ниже:",
+        "cancelled": "❌ Действие отменено.",
+        "lang_prompt": "🌐 **Выберите язык интерфейса / Lütfen dil seçin:**",
+        "lang_switched": "🇷🇺 Язык переключён на **Русский**!",
+        "send_photos_prompt": (
+            "📸 **Отправьте все фотографии одной модели** (альбомом или файлами).\n\n"
+            "Когда загрузите все фото, выберите внизу:\n"
+            "• **✅ Двойной коллаж (по 2 фото)** — формат PÎVOK 4×3\n"
+            "• **✅ Одинарный коллаж (по 1 фото)**"
+        ),
+        "only_images": "⚠️ Пожалуйста, отправляйте только изображения.",
+        "photos_buffered": "📥 Принято фотографий: **{n} шт.**\nДогрузите ещё или нажмите кнопку ниже:",
+        "no_photos_yet": "⚠️ Вы ещё не загрузили ни одной фотографии!",
+        "need_2_photos": "⚠️ Для двойного коллажа нужно минимум 2 фотографии.",
+        "processing_extra": "⏳ Обрабатываю новые фото...",
+        "ask_grouping": "📸 Загружено **{n} фото**. Как сгруппировать пары?",
+        "ask_code": "🔖 Введите **Код модели** (например: `O-21476`):",
+        "err_code": "⚠️ Введите корректный код модели:",
+        "ask_size": "📏 Выберите или напишите **Размеры** (например: `38-44`):",
+        "err_size": "⚠️ Укажите размерный ряд:",
+        "ask_price": "💰 Введите **Цену в $** (например: `79`):",
+        "err_price": "⚠️ Введите цену:",
+        "summary": (
+            "📋 **Проверьте данные коллажа PÎVOK:**\n\n"
+            "🔖 **Код:** `{code}`\n"
+            "💰 **Цена:** `{price}$`\n"
+            "📏 **Размеры:** `{size}`\n"
+            "🖼 **Фотографий:** {cnt} шт. → **{est} колл.** (формат 4×3)"
+        ),
+        "ask_edit_code": "🔖 Введите новый **Код модели**:",
+        "ask_edit_size": "📏 Выберите или введите новые **Размеры**:",
+        "ask_edit_price": "💰 Введите новую **Цену ($)**:",
+        "choose_below": "Выберите кнопку внизу 👇",
+        "generating": "⚙️ Собираю коллажи PÎVOK (4×3) в облаке...",
+        "preview_ready": (
+            "✨ **PÎVOK — Коллажи готовы ({n} шт.)**\n"
+            "🔖 Код: `{code}` | 💰 Цена: `{price}$` | 📏 Размеры: `{sizes}`\n\n"
+            "При необходимости поправьте кроп через 🛠 или выберите действие:"
+        ),
+        "next_model_hint": "Готово! Чтобы собрать следующую модель, нажмите кнопку ниже:",
+        "err_gen": "❌ Ошибка при создании коллажей: {e}",
+        "folder_missing": "⚠️ Папка с готовыми коллажами не найдена.",
+        "gen_empty": "⚠️ Не удалось сгенерировать коллажи.",
+        "sending_originals": "Отправляю оригиналы 2160×2880...",
+        "refreshing": "Обновляю превью...",
+        "ask_add_color": "📸 Отправьте дополнительные фото (новый цвет) для этой модели, затем нажмите **«✅ ВСЕ ФОТО ЗАГРУЖЕНЫ»**.",
+        "deleted_toast": "Удалено",
+        "deleted_msg": "🗑 Коллажи удалены.",
+        "catch_all": "🌸 **PÎVOK Cloud Studio**\nНажмите **«🖼 Создать коллаж»** внизу (или отправьте фото прямо сюда):",
+    },
+    "tr": {
+        "btn_create": "🖼 Kolaj Oluştur",
+        "btn_lang": "🇷🇺 Русский / Dil",
+        "btn_cancel": "❌ İptal",
+        "btn_pair_2": "✅ İkili Kolaj (2 Fotoğraf)",
+        "btn_single_1": "✅ Tekli Kolaj (1 Fotoğraf)",
+        "btn_all_loaded": "✅ TÜM FOTOĞRAFLAR YÜKLENDİ",
+        "btn_group_smart": "🧠 Akıllı Gruplama (Otomatik)",
+        "btn_group_seq": "🔢 Sırayla İkili (1-2, 3-4)",
+        "btn_confirm_go": "✅ Kolajları Oluştur",
+        "btn_edit_code": "✏️ Kodu Değiştir",
+        "btn_edit_size": "✏️ Bedeni Değiştir",
+        "btn_edit_price": "✏️ Fiyatı Değiştir",
+        "btn_dl_files": "📥 Dosya Olarak İndir (Orijinal)",
+        "btn_refresh": "🔄 Önizlemeyi Yenile",
+        "btn_add_color": "🎨 Yeni Renk (Fotoğraf) Ekle",
+        "btn_delete": "🗑 Sil",
+        "welcome": "🌸 **PÎVOK Cloud Studio (7/24)**\nLütfen aşağıdaki menüden işlem seçin:",
+        "cancelled": "❌ İşlem iptal edildi.",
+        "lang_prompt": "🌐 **Lütfen dil seçin / Выберите язык интерфейса:**",
+        "lang_switched": "🇹🇷 Dil **Türkçe** olarak değiştirildi!",
+        "send_photos_prompt": (
+            "📸 **Bir modele ait tüm fotoğrafları gönderin** (albüm veya dosya olarak).\n\n"
+            "Tüm fotoğraflar yüklendiğinde aşağıdan seçin:\n"
+            "• **✅ İkili Kolaj (2 Fotoğraf)** — PÎVOK 4×3 formatı\n"
+            "• **✅ Tekli Kolaj (1 Fotoğraf)**"
+        ),
+        "only_images": "⚠️ Lütfen yalnızca görsel / fotoğraf gönderin.",
+        "photos_buffered": "📥 Alınan fotoğraf: **{n} adet**\nDaha fazla yükleyin veya aşağıdaki butona basın:",
+        "no_photos_yet": "⚠️ Henüz hiç fotoğraf yüklemediniz!",
+        "need_2_photos": "⚠️ İkili kolaj için en az 2 fotoğraf gereklidir.",
+        "processing_extra": "⏳ Yeni fotoğraflar işleniyor...",
+        "ask_grouping": "📸 **{n} fotoğraf** yüklendi. Eşleştirme nasıl yapılsın?",
+        "ask_code": "🔖 **Model Kodunu** girin (örnek: `O-21476`):",
+        "err_code": "⚠️ Lütfen geçerli bir model kodu girin:",
+        "ask_size": "📏 **Beden aralığını** seçin veya yazın (örnek: `38-44`):",
+        "err_size": "⚠️ Lütfen beden aralığını belirtin:",
+        "ask_price": "💰 **Fiyatı ($)** girin (örnek: `79`):",
+        "err_price": "⚠️ Lütfen fiyat girin:",
+        "summary": (
+            "📋 **PÎVOK kolaj bilgilerini kontrol edin:**\n\n"
+            "🔖 **Kod:** `{code}`\n"
+            "💰 **Fiyat:** `{price}$`\n"
+            "📏 **Beden:** `{size}`\n"
+            "🖼 **Fotoğraf:** {cnt} adet → **{est} kolaj** (4×3 formatı)"
+        ),
+        "ask_edit_code": "🔖 Yeni **Model Kodunu** girin:",
+        "ask_edit_size": "📏 Yeni **Beden aralığını** seçin veya yazın:",
+        "ask_edit_price": "💰 Yeni **Fiyatı ($)** girin:",
+        "choose_below": "Lütfen aşağıdaki butonlardan birini seçin 👇",
+        "generating": "⚙️ PÎVOK kolajları (4×3) bulutta hazırlanıyor...",
+        "preview_ready": (
+            "✨ **PÎVOK — Kolajlar hazır ({n} adet)**\n"
+            "🔖 Kod: `{code}` | 💰 Fiyat: `{price}$` | 📏 Beden: `{sizes}`\n\n"
+            "Gerekirse 🛠 ile kadrajı düzenleyin veya işlem seçin:"
+        ),
+        "next_model_hint": "Tamamlandı! Yeni bir model hazırlamak için aşağıdaki butona basın:",
+        "err_gen": "❌ Kolaj oluşturulurken hata oluştu: {e}",
+        "folder_missing": "⚠️ Kolaj klasörü bulunamadı.",
+        "gen_empty": "⚠️ Kolaj oluşturulamadı.",
+        "sending_originals": "2160×2880 orijinal dosyalar gönderiliyor...",
+        "refreshing": "Önizleme yenileniyor...",
+        "ask_add_color": "📸 Bu model için ek fotoğrafları (yeni renk) gönderin, ardından **«✅ TÜM FOTOĞRAFLAR YÜKLENDİ»** butonuna basın.",
+        "deleted_toast": "Silindi",
+        "deleted_msg": "🗑 Kolajlar silindi.",
+        "catch_all": "🌸 **PÎVOK Cloud Studio**\nAşağıdaki **«🖼 Kolaj Oluştur»** butonuna basın (veya fotoğrafları doğrudan buraya gönderin):",
+    },
+}
+
+CREATE_TEXTS = {STRINGS["ru"]["btn_create"], STRINGS["tr"]["btn_create"]}
+LANG_BTN_TEXTS = {STRINGS["ru"]["btn_lang"], STRINGS["tr"]["btn_lang"]}
+CANCEL_TEXTS = {
+    "❌ Отмена",
+    "Отмена",
+    "❌ İptal",
+    "İptal",
+    "iptal",
+    "/cancel",
+    "/stop",
+}
+DONE_PHOTO_TEXTS = {
+    STRINGS["ru"]["btn_all_loaded"],
+    STRINGS["tr"]["btn_all_loaded"],
+    STRINGS["ru"]["btn_pair_2"],
+    STRINGS["tr"]["btn_pair_2"],
+    STRINGS["ru"]["btn_single_1"],
+    STRINGS["tr"]["btn_single_1"],
+}
+SINGLE_MODE_TEXTS = {STRINGS["ru"]["btn_single_1"], STRINGS["tr"]["btn_single_1"]}
+SMART_GROUP_TEXTS = {STRINGS["ru"]["btn_group_smart"], STRINGS["tr"]["btn_group_smart"]}
+CONFIRM_GO_TEXTS = {STRINGS["ru"]["btn_confirm_go"], STRINGS["tr"]["btn_confirm_go"]}
+EDIT_CODE_TEXTS = {STRINGS["ru"]["btn_edit_code"], STRINGS["tr"]["btn_edit_code"]}
+EDIT_SIZE_TEXTS = {STRINGS["ru"]["btn_edit_size"], STRINGS["tr"]["btn_edit_size"]}
+EDIT_PRICE_TEXTS = {STRINGS["ru"]["btn_edit_price"], STRINGS["tr"]["btn_edit_price"]}
 
 
 def _load_state_store() -> dict:
@@ -110,13 +276,36 @@ _env_ids = [
 ALLOWED_USERS: list[int] = list(set(_STORE.get("allowed_users", []) + _env_ids))
 pending_dispatches: Dict[str, str] = _STORE.get("pending_dispatches", {})
 media_msgs_store: Dict[str, list[int]] = _STORE.get("media_msgs", {})
+user_langs: Dict[str, str] = _STORE.get("user_langs", {})
 
 
 def persist_store():
     _STORE["allowed_users"] = ALLOWED_USERS
     _STORE["pending_dispatches"] = pending_dispatches
     _STORE["media_msgs"] = media_msgs_store
+    _STORE["user_langs"] = user_langs
     _save_state_store(_STORE)
+
+
+def get_lang(user_id: Optional[int], tg_lang_code: Optional[str] = None) -> str:
+    if user_id is not None:
+        saved = user_langs.get(str(user_id))
+        if saved in ("ru", "tr"):
+            return saved
+    if tg_lang_code and tg_lang_code.lower().startswith("tr"):
+        return "tr"
+    return "ru"
+
+
+def set_lang(user_id: int, lang: str):
+    if lang in ("ru", "tr"):
+        user_langs[str(user_id)] = lang
+        persist_store()
+
+
+def tr_str(lang: str, key: str, **kwargs) -> str:
+    text = STRINGS.get(lang, STRINGS["ru"]).get(key, STRINGS["ru"].get(key, key))
+    return text.format(**kwargs) if kwargs else text
 
 
 def build_keyboard(items, columns=2):
@@ -125,6 +314,21 @@ def build_keyboard(items, columns=2):
         builder.add(KeyboardButton(text=item))
     builder.adjust(columns)
     return builder.as_markup(resize_keyboard=True)
+
+
+def main_menu_kb(lang: str):
+    return build_keyboard([tr_str(lang, "btn_create"), tr_str(lang, "btn_lang")], 2)
+
+
+def lang_inline_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="setlang_ru"),
+                InlineKeyboardButton(text="🇹🇷 Türkçe", callback_data="setlang_tr"),
+            ]
+        ]
+    )
 
 
 def analyze_full_body(img_bytes: bytes) -> float:
@@ -172,28 +376,39 @@ async def download_single_photo(f_id: str, bot_inst: Bot) -> dict:
         except Exception as e:
             logger.error(f"Error downloading {f_id} (attempt {attempt + 1}): {e}")
             await asyncio.sleep(0.3)
-    raise RuntimeError(f"Не удалось скачать фото {f_id}")
+    raise RuntimeError(f"Download failed: {f_id}")
 
 
 class SecurityMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
-        user_id = event.from_user.id if hasattr(event, "from_user") and event.from_user else None
+        user = getattr(event, "from_user", None)
+        user_id = user.id if user else None
         if user_id and user_id not in ALLOWED_USERS:
             if hasattr(event, "text") and event.text:
                 entered = event.text.strip().lower()
                 if entered in {SECRET_PASSWORD.lower(), "пивок", "pivok"}:
                     ALLOWED_USERS.append(user_id)
-                    persist_store()
+                    lang = get_lang(user_id, getattr(user, "language_code", None))
+                    set_lang(user_id, lang)
                     await event.answer(
-                        "✅ **Доступ к PÎVOK Cloud открыт!**\n\nВыберите действие в меню ниже:",
-                        reply_markup=build_keyboard(MAIN_MENU, 1),
+                        "✅ **Доступ открыт! / Erişim açıldı!**\n\n"
+                        "🌐 Выберите язык / Lütfen dil seçin:",
+                        reply_markup=lang_inline_kb(),
+                        parse_mode="Markdown",
+                    )
+                    await event.answer(
+                        tr_str(lang, "welcome"),
+                        reply_markup=main_menu_kb(lang),
                         parse_mode="Markdown",
                     )
                     return
-                await event.answer("🔒 Бот PÎVOK защищён.\nОтправьте пароль для входа:")
+                await event.answer(
+                    "🔒 Бот PÎVOK защищён. Введите пароль:\n"
+                    "🔒 PÎVOK botu korumalıdır. Lütfen şifreyi girin:"
+                )
                 return
             if hasattr(event, "data") and event.data:
-                await event.answer("🔒 Доступ закрыт. Введите пароль в чат.", show_alert=True)
+                await event.answer("🔒 Введите пароль / Şifreyi girin", show_alert=True)
                 return
             return
         return await handler(event, data)
@@ -215,7 +430,9 @@ dp.message.outer_middleware(SecurityMiddleware())
 dp.callback_query.outer_middleware(SecurityMiddleware())
 
 
-def build_preview_keyboard(folder_name: str, photos: list[str], chat_id: int, short_id: str) -> InlineKeyboardMarkup:
+def build_preview_keyboard(
+    folder_name: str, photos: list[str], chat_id: int, short_id: str, lang: str
+) -> InlineKeyboardMarkup:
     encoded_folder = urllib.parse.quote(folder_name)
     crop_buttons = []
     if PUBLIC_BASE_URL.startswith("https://"):
@@ -226,32 +443,33 @@ def build_preview_keyboard(folder_name: str, photos: list[str], chat_id: int, sh
                 InlineKeyboardButton(
                     text=f"🛠 {display_name}",
                     web_app=WebAppInfo(
-                        url=f"{PUBLIC_BASE_URL}/webapp/index.html?folder={encoded_folder}&chat_id={chat_id}&pair={i}"
+                        url=f"{PUBLIC_BASE_URL}/webapp/index.html?folder={encoded_folder}&chat_id={chat_id}&pair={i}&lang={lang}"
                     ),
                 )
             )
 
     crop_rows = [crop_buttons[i : i + 3] for i in range(0, len(crop_buttons), 3)]
     layout = [
-        [InlineKeyboardButton(text="📥 Скачать файлами (без сжатия)", callback_data=f"files_{short_id}")],
+        [InlineKeyboardButton(text=tr_str(lang, "btn_dl_files"), callback_data=f"files_{short_id}")],
     ]
     layout.extend(crop_rows)
     layout.extend(
         [
-            [InlineKeyboardButton(text="🔄 Обновить превью", callback_data=f"refresh_{short_id}")],
-            [InlineKeyboardButton(text="🎨 Добавить фото цвета", callback_data=f"addcolor_{short_id}")],
-            [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{short_id}")],
+            [InlineKeyboardButton(text=tr_str(lang, "btn_refresh"), callback_data=f"refresh_{short_id}")],
+            [InlineKeyboardButton(text=tr_str(lang, "btn_add_color"), callback_data=f"addcolor_{short_id}")],
+            [InlineKeyboardButton(text=tr_str(lang, "btn_delete"), callback_data=f"del_{short_id}")],
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=layout)
 
 
-async def send_collage_preview(chat_id: int, folder_name: str):
+async def send_collage_preview(chat_id: int, folder_name: str, lang: Optional[str] = None):
     if not bot:
         return
+    lang = lang or get_lang(chat_id)
     folder_path = os.path.join(OUTPUT_DIR, folder_name)
     if not os.path.isdir(folder_path):
-        await bot.send_message(chat_id, "⚠️ Папка с готовыми коллажами не найдена.")
+        await bot.send_message(chat_id, tr_str(lang, "folder_missing"))
         return
 
     photos = sorted(
@@ -260,7 +478,7 @@ async def send_collage_preview(chat_id: int, folder_name: str):
         if f.lower().endswith((".jpg", ".jpeg", ".png"))
     )
     if not photos:
-        await bot.send_message(chat_id, "⚠️ Не удалось сгенерировать коллажи.")
+        await bot.send_message(chat_id, tr_str(lang, "gen_empty"))
         return
 
     short_id = hashlib.md5(folder_name.encode("utf-8")).hexdigest()[:8]
@@ -281,12 +499,10 @@ async def send_collage_preview(chat_id: int, folder_name: str):
     persist_store()
 
     _, _, code, sizes, price = collage_engine.parse_folder_metadata(folder_name)
-    kb = build_preview_keyboard(folder_name, photos, chat_id, short_id)
+    kb = build_preview_keyboard(folder_name, photos, chat_id, short_id, lang)
     await bot.send_message(
         chat_id,
-        f"✨ **PÎVOK — Коллажи готовы ({len(photos)} шт.)**\n"
-        f"🔖 Код: `{code}` | 💰 Цена: `{price}$` | 📏 Размеры: `{sizes}`\n\n"
-        "При необходимости поправьте кроп через 🛠 или выберите действие:",
+        tr_str(lang, "preview_ready", n=len(photos), code=code, price=price, sizes=sizes),
         reply_markup=kb,
         parse_mode="Markdown",
     )
@@ -296,33 +512,69 @@ async def send_collage_preview(chat_id: int, folder_name: str):
 async def cmd_start(message: Message, state: FSMContext):
     PHOTO_BUFFER.pop(message.chat.id, None)
     await state.clear()
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
     await message.answer(
-        "🌸 **PÎVOK Cloud Studio (24/7)**\nВыберите действие в меню ниже:",
-        reply_markup=build_keyboard(MAIN_MENU, 1),
+        tr_str(lang, "welcome"),
+        reply_markup=main_menu_kb(lang),
         parse_mode="Markdown",
     )
 
 
+@dp.message(Command("lang", "language", "dil"))
+@dp.message(F.text.in_(LANG_BTN_TEXTS))
+async def cmd_language(message: Message):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    await message.answer(
+        tr_str(lang, "lang_prompt"),
+        reply_markup=lang_inline_kb(),
+        parse_mode="Markdown",
+    )
+
+
+@dp.callback_query(F.data.in_({"setlang_ru", "setlang_tr"}))
+async def cb_set_language(callback: CallbackQuery, state: FSMContext):
+    new_lang = "tr" if callback.data.endswith("_tr") else "ru"
+    set_lang(callback.from_user.id, new_lang)
+    await callback.answer("🇹🇷 Türkçe" if new_lang == "tr" else "🇷🇺 Русский")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    cur_state = await state.get_state()
+    if cur_state is None:
+        await bot.send_message(
+            callback.message.chat.id,
+            tr_str(new_lang, "lang_switched") + "\n\n" + tr_str(new_lang, "welcome"),
+            reply_markup=main_menu_kb(new_lang),
+            parse_mode="Markdown",
+        )
+    else:
+        await bot.send_message(
+            callback.message.chat.id,
+            tr_str(new_lang, "lang_switched"),
+            parse_mode="Markdown",
+        )
+
+
 @dp.message(Command("cancel", "stop"))
-@dp.message(F.text.in_({"❌ Отмена", "Отмена", "/cancel", "/stop"}))
+@dp.message(F.text.in_(CANCEL_TEXTS))
 async def cmd_cancel(message: Message, state: FSMContext):
     PHOTO_BUFFER.pop(message.chat.id, None)
     await state.clear()
-    await message.answer("❌ Действие отменено.", reply_markup=build_keyboard(MAIN_MENU, 1))
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    await message.answer(tr_str(lang, "cancelled"), reply_markup=main_menu_kb(lang))
 
 
-@dp.message(F.text == "🖼 Создать коллаж")
+@dp.message(F.text.in_(CREATE_TEXTS))
 async def cmd_create_collage(message: Message, state: FSMContext):
     PHOTO_BUFFER.pop(message.chat.id, None)
     await state.clear()
     await state.set_state(CollageForm.photo)
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
     await message.answer(
-        "📸 **Отправьте все фотографии одной модели** (альбомом или файлами).\n\n"
-        "Когда загрузите все фото, выберите внизу:\n"
-        "• **✅ Двойной коллаж (по 2 фото)** — формат PÎVOK 4×3\n"
-        "• **✅ Одинарный коллаж (по 1 фото)**",
+        tr_str(lang, "send_photos_prompt"),
         reply_markup=build_keyboard(
-            ["✅ Двойной коллаж (по 2 фото)", "✅ Одинарный коллаж (по 1 фото)", "❌ Отмена"], 2
+            [tr_str(lang, "btn_pair_2"), tr_str(lang, "btn_single_1"), tr_str(lang, "btn_cancel")], 2
         ),
         parse_mode="Markdown",
     )
@@ -330,9 +582,10 @@ async def cmd_create_collage(message: Message, state: FSMContext):
 
 @dp.message(StateFilter(None, CollageForm.photo), F.photo | F.document)
 async def handle_incoming_photo(message: Message, state: FSMContext):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
     if message.document:
         if not (message.document.mime_type or "").startswith("image/"):
-            await message.answer("⚠️ Пожалуйста, отправляйте только изображения.")
+            await message.answer(tr_str(lang, "only_images"))
             return
         file_id = message.document.file_id
     else:
@@ -346,8 +599,9 @@ async def handle_incoming_photo(message: Message, state: FSMContext):
 
     chat_id = message.chat.id
     if chat_id not in PHOTO_BUFFER:
-        PHOTO_BUFFER[chat_id] = {"ids": [], "task": None}
+        PHOTO_BUFFER[chat_id] = {"ids": [], "task": None, "lang": lang}
     PHOTO_BUFFER[chat_id]["ids"].append(file_id)
+    PHOTO_BUFFER[chat_id]["lang"] = lang
 
     if PHOTO_BUFFER[chat_id]["task"]:
         PHOTO_BUFFER[chat_id]["task"].cancel()
@@ -364,30 +618,31 @@ async def _flush_photo_buffer(chat_id: int, state: FSMContext):
     if not buf:
         return
 
+    lang = buf.get("lang") or get_lang(chat_id)
     data = await state.get_data()
     photo_ids = data.get("photo_ids", [])
     photo_ids.extend(buf["ids"])
     await state.update_data(photo_ids=photo_ids)
 
     kb = (
-        build_keyboard(["✅ ВСЕ ФОТО ЗАГРУЖЕНЫ", "❌ Отмена"], 1)
+        build_keyboard([tr_str(lang, "btn_all_loaded"), tr_str(lang, "btn_cancel")], 1)
         if data.get("is_add_color")
-        else build_keyboard(["✅ Двойной коллаж (по 2 фото)", "✅ Одинарный коллаж (по 1 фото)", "❌ Отмена"], 2)
+        else build_keyboard(
+            [tr_str(lang, "btn_pair_2"), tr_str(lang, "btn_single_1"), tr_str(lang, "btn_cancel")], 2
+        )
     )
     await bot.send_message(
         chat_id,
-        f"📥 Принято фотографий: **{len(photo_ids)} шт.**\nДогрузите ещё или нажмите кнопку ниже:",
+        tr_str(lang, "photos_buffered", n=len(photo_ids)),
         reply_markup=kb,
         parse_mode="Markdown",
     )
 
 
-@dp.message(
-    CollageForm.photo,
-    F.text.in_({"✅ ВСЕ ФОТО ЗАГРУЖЕНЫ", "✅ Двойной коллаж (по 2 фото)", "✅ Одинарный коллаж (по 1 фото)"}),
-)
+@dp.message(CollageForm.photo, F.text.in_(DONE_PHOTO_TEXTS))
 async def handle_all_photos_loaded(message: Message, state: FSMContext):
     chat_id = message.chat.id
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
     if chat_id in PHOTO_BUFFER:
         buf = PHOTO_BUFFER.pop(chat_id)
         if buf.get("task"):
@@ -400,14 +655,14 @@ async def handle_all_photos_loaded(message: Message, state: FSMContext):
     data = await state.get_data()
     photo_ids = data.get("photo_ids", [])
     if not photo_ids:
-        await message.answer("⚠️ Вы ещё не загрузили ни одной фотографии!")
+        await message.answer(tr_str(lang, "no_photos_yet"))
         return
 
     if data.get("is_add_color") and data.get("target_folder"):
         folder_name = data["target_folder"]
         inc_folder = os.path.join(INCOMING_DIR, folder_name)
         os.makedirs(inc_folder, exist_ok=True)
-        wait_m = await message.answer("⏳ Обрабатываю новые фото...", reply_markup=ReplyKeyboardRemove())
+        wait_m = await message.answer(tr_str(lang, "processing_extra"), reply_markup=ReplyKeyboardRemove())
 
         downloaded = await asyncio.gather(*(download_single_photo(fid, bot) for fid in photo_ids))
         for fid in photo_ids:
@@ -439,71 +694,104 @@ async def handle_all_photos_loaded(message: Message, state: FSMContext):
             await wait_m.delete()
         except Exception:
             pass
-        await send_collage_preview(chat_id, folder_name)
+        await send_collage_preview(chat_id, folder_name, lang=lang)
         return
 
-    is_single = "Одинарный" in message.text
+    is_single = message.text in SINGLE_MODE_TEXTS
     if not is_single and len(photo_ids) < 2:
-        await message.answer("⚠️ Для двойного коллажа нужно минимум 2 фотографии.")
+        await message.answer(tr_str(lang, "need_2_photos"))
         return
 
     await state.update_data(is_single=is_single)
     if is_single or len(photo_ids) == 2:
         await state.update_data(grouping_mode="sequential" if is_single else "smart")
         await state.set_state(CollageForm.code)
-        await message.answer("🔖 Введите **Код модели** (например: `O-21476`):", reply_markup=build_keyboard(["❌ Отмена"], 1), parse_mode="Markdown")
+        await message.answer(
+            tr_str(lang, "ask_code"),
+            reply_markup=build_keyboard([tr_str(lang, "btn_cancel")], 1),
+            parse_mode="Markdown",
+        )
     else:
         await state.set_state(CollageForm.grouping_mode)
         await message.answer(
-            f"📸 Загружено **{len(photo_ids)} фото**. Как сгруппировать пары?",
-            reply_markup=build_keyboard(["🧠 Умная группировка (Авто)", "🔢 По парам (1-2, 3-4)", "❌ Отмена"], 2),
+            tr_str(lang, "ask_grouping", n=len(photo_ids)),
+            reply_markup=build_keyboard(
+                [tr_str(lang, "btn_group_smart"), tr_str(lang, "btn_group_seq"), tr_str(lang, "btn_cancel")], 2
+            ),
             parse_mode="Markdown",
         )
 
 
 @dp.message(CollageForm.grouping_mode)
 async def handle_grouping_mode(message: Message, state: FSMContext):
-    await state.update_data(grouping_mode="smart" if "Умная" in (message.text or "") else "sequential")
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    is_smart = (message.text in SMART_GROUP_TEXTS) or ("Умная" in (message.text or "")) or ("Akıllı" in (message.text or ""))
+    await state.update_data(grouping_mode="smart" if is_smart else "sequential")
     await state.set_state(CollageForm.code)
-    await message.answer("🔖 Введите **Код модели** (например: `O-21476`):", reply_markup=build_keyboard(["❌ Отмена"], 1), parse_mode="Markdown")
+    await message.answer(
+        tr_str(lang, "ask_code"),
+        reply_markup=build_keyboard([tr_str(lang, "btn_cancel")], 1),
+        parse_mode="Markdown",
+    )
 
 
 @dp.message(CollageForm.code)
 async def handle_code(message: Message, state: FSMContext):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
     code_val = (message.text or "").strip().upper()
     if not code_val:
-        await message.answer("⚠️ Введите корректный код модели:")
+        await message.answer(tr_str(lang, "err_code"))
         return
     await state.update_data(code=code_val)
     await state.set_state(CollageForm.size)
-    await message.answer("📏 Выберите или напишите **Размеры** (например: `38-44`):", reply_markup=build_keyboard(SIZE_LIST + ["❌ Отмена"], 3), parse_mode="Markdown")
+    await message.answer(
+        tr_str(lang, "ask_size"),
+        reply_markup=build_keyboard(SIZE_LIST + [tr_str(lang, "btn_cancel")], 3),
+        parse_mode="Markdown",
+    )
 
 
 @dp.message(CollageForm.size)
 async def handle_size(message: Message, state: FSMContext):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
     size_val = (message.text or "").strip()
     if not size_val:
-        await message.answer("⚠️ Укажите размерный ряд:")
+        await message.answer(tr_str(lang, "err_size"))
         return
     await state.update_data(size=size_val)
     await state.set_state(CollageForm.price)
-    await message.answer("💰 Введите **Цену в $** (например: `79`):", reply_markup=build_keyboard(["❌ Отмена"], 1), parse_mode="Markdown")
+    await message.answer(
+        tr_str(lang, "ask_price"),
+        reply_markup=build_keyboard([tr_str(lang, "btn_cancel")], 1),
+        parse_mode="Markdown",
+    )
 
 
-async def show_summary(message: Message, state: FSMContext):
+async def show_summary(message: Message, state: FSMContext, lang: str):
     data = await state.get_data()
     photo_cnt = len(data.get("photo_ids", []))
     is_single = data.get("is_single", False)
     est_collages = photo_cnt if is_single else photo_cnt // 2
     await state.set_state(CollageForm.confirm)
     await message.answer(
-        "📋 **Проверьте данные коллажа PÎVOK:**\n\n"
-        f"🔖 **Код:** `{data.get('code')}`\n"
-        f"💰 **Цена:** `{data.get('price')}$`\n"
-        f"📏 **Размеры:** `{data.get('size')}`\n"
-        f"🖼 **Фотографий:** {photo_cnt} шт. → **{est_collages} колл.** (формат 4×3)",
+        tr_str(
+            lang,
+            "summary",
+            code=data.get("code"),
+            price=data.get("price"),
+            size=data.get("size"),
+            cnt=photo_cnt,
+            est=est_collages,
+        ),
         reply_markup=build_keyboard(
-            ["✅ Создать коллажи", "✏️ Изменить Код", "✏️ Изменить Размеры", "✏️ Изменить Цену", "❌ Отмена"], 2
+            [
+                tr_str(lang, "btn_confirm_go"),
+                tr_str(lang, "btn_edit_code"),
+                tr_str(lang, "btn_edit_size"),
+                tr_str(lang, "btn_edit_price"),
+                tr_str(lang, "btn_cancel"),
+            ],
+            2,
         ),
         parse_mode="Markdown",
     )
@@ -511,34 +799,48 @@ async def show_summary(message: Message, state: FSMContext):
 
 @dp.message(CollageForm.price)
 async def handle_price(message: Message, state: FSMContext):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
     price_val = (message.text or "").strip().replace("$", "").strip()
     if not price_val:
-        await message.answer("⚠️ Введите цену:")
+        await message.answer(tr_str(lang, "err_price"))
         return
     await state.update_data(price=price_val)
-    await show_summary(message, state)
+    await show_summary(message, state, lang)
 
 
 @dp.message(CollageForm.confirm)
 async def handle_confirm(message: Message, state: FSMContext):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
     txt = (message.text or "").strip()
-    if txt == "✏️ Изменить Код":
+    if txt in EDIT_CODE_TEXTS:
         await state.update_data(editing="code")
         await state.set_state(CollageForm.edit_field)
-        await message.answer("🔖 Введите новый **Код модели**:", reply_markup=build_keyboard(["❌ Отмена"], 1), parse_mode="Markdown")
+        await message.answer(
+            tr_str(lang, "ask_edit_code"),
+            reply_markup=build_keyboard([tr_str(lang, "btn_cancel")], 1),
+            parse_mode="Markdown",
+        )
         return
-    if txt == "✏️ Изменить Размеры":
+    if txt in EDIT_SIZE_TEXTS:
         await state.update_data(editing="size")
         await state.set_state(CollageForm.edit_field)
-        await message.answer("📏 Выберите или введите новые **Размеры**:", reply_markup=build_keyboard(SIZE_LIST + ["❌ Отмена"], 3), parse_mode="Markdown")
+        await message.answer(
+            tr_str(lang, "ask_edit_size"),
+            reply_markup=build_keyboard(SIZE_LIST + [tr_str(lang, "btn_cancel")], 3),
+            parse_mode="Markdown",
+        )
         return
-    if txt == "✏️ Изменить Цену":
+    if txt in EDIT_PRICE_TEXTS:
         await state.update_data(editing="price")
         await state.set_state(CollageForm.edit_field)
-        await message.answer("💰 Введите новую **Цену ($)**:", reply_markup=build_keyboard(["❌ Отмена"], 1), parse_mode="Markdown")
+        await message.answer(
+            tr_str(lang, "ask_edit_price"),
+            reply_markup=build_keyboard([tr_str(lang, "btn_cancel")], 1),
+            parse_mode="Markdown",
+        )
         return
-    if txt != "✅ Создать коллажи":
-        await message.answer("Выберите кнопку внизу 👇")
+    if txt not in CONFIRM_GO_TEXTS:
+        await message.answer(tr_str(lang, "choose_below"))
         return
 
     data = await state.get_data()
@@ -555,10 +857,7 @@ async def handle_confirm(message: Message, state: FSMContext):
     inc_folder = os.path.join(INCOMING_DIR, folder_name)
     os.makedirs(inc_folder, exist_ok=True)
 
-    prog_msg = await message.answer(
-        "⚙️ Собираю коллажи PÎVOK (4×3) в облаке...",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    prog_msg = await message.answer(tr_str(lang, "generating"), reply_markup=ReplyKeyboardRemove())
 
     try:
         downloaded = await asyncio.gather(*(download_single_photo(fid, bot) for fid in photo_ids))
@@ -591,20 +890,25 @@ async def handle_confirm(message: Message, state: FSMContext):
             await prog_msg.delete()
         except Exception:
             pass
-        await send_collage_preview(chat_id, folder_name)
+        await send_collage_preview(chat_id, folder_name, lang=lang)
         await bot.send_message(
             chat_id,
-            "Готово! Чтобы собрать следующую модель, нажмите кнопку ниже:",
-            reply_markup=build_keyboard(MAIN_MENU, 1),
+            tr_str(lang, "next_model_hint"),
+            reply_markup=main_menu_kb(lang),
         )
     except Exception as e:
         logger.exception("Error generating collages")
         await state.clear()
-        await bot.send_message(chat_id, f"❌ Ошибка при создании коллажей: {e}", reply_markup=build_keyboard(MAIN_MENU, 1))
+        await bot.send_message(
+            chat_id,
+            tr_str(lang, "err_gen", e=str(e)),
+            reply_markup=main_menu_kb(lang),
+        )
 
 
 @dp.message(CollageForm.edit_field)
 async def handle_edit_field(message: Message, state: FSMContext):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
     data = await state.get_data()
     field = data.get("editing")
     val = (message.text or "").strip()
@@ -614,22 +918,23 @@ async def handle_edit_field(message: Message, state: FSMContext):
         await state.update_data(size=val)
     elif field == "price":
         await state.update_data(price=val.replace("$", "").strip())
-    await show_summary(message, state)
+    await show_summary(message, state, lang)
 
 
 @dp.callback_query(F.data.startswith("files_"))
 async def cb_send_uncompressed_files(callback: CallbackQuery):
+    lang = get_lang(callback.from_user.id, callback.from_user.language_code)
     short_id = callback.data.split("_", 1)[1]
     folder_path = pending_dispatches.get(short_id)
     if not folder_path or not os.path.exists(folder_path):
-        await callback.answer("Файлы уже удалены.", show_alert=True)
+        await callback.answer(tr_str(lang, "folder_missing"), show_alert=True)
         return
     photos = sorted(
         os.path.join(folder_path, f)
         for f in os.listdir(folder_path)
         if f.lower().endswith((".jpg", ".jpeg", ".png"))
     )
-    await callback.answer("Отправляю оригиналы 2160×2880...")
+    await callback.answer(tr_str(lang, "sending_originals"))
     for chunk_start in range(0, len(photos), 10):
         chunk = photos[chunk_start : chunk_start + 10]
         await bot.send_media_group(
@@ -640,40 +945,43 @@ async def cb_send_uncompressed_files(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("refresh_"))
 async def cb_refresh_preview(callback: CallbackQuery):
+    lang = get_lang(callback.from_user.id, callback.from_user.language_code)
     short_id = callback.data.split("_", 1)[1]
     folder_path = pending_dispatches.get(short_id)
     if not folder_path or not os.path.exists(folder_path):
-        await callback.answer("Папка не найдена.", show_alert=True)
+        await callback.answer(tr_str(lang, "folder_missing"), show_alert=True)
         return
-    await callback.answer("Обновляю превью...")
+    await callback.answer(tr_str(lang, "refreshing"))
     folder_name = os.path.basename(folder_path)
     try:
         await callback.message.delete()
     except Exception:
         pass
-    await send_collage_preview(callback.message.chat.id, folder_name)
+    await send_collage_preview(callback.message.chat.id, folder_name, lang=lang)
 
 
 @dp.callback_query(F.data.startswith("addcolor_"))
 async def cb_add_color(callback: CallbackQuery, state: FSMContext):
+    lang = get_lang(callback.from_user.id, callback.from_user.language_code)
     short_id = callback.data.split("_", 1)[1]
     folder_path = pending_dispatches.get(short_id)
     if not folder_path or not os.path.exists(folder_path):
-        await callback.answer("Ошибка: папка не найдена.", show_alert=True)
+        await callback.answer(tr_str(lang, "folder_missing"), show_alert=True)
         return
     await state.update_data(is_add_color=True, target_folder=os.path.basename(folder_path), photo_ids=[])
     await state.set_state(CollageForm.photo)
     await callback.answer()
     await bot.send_message(
         callback.message.chat.id,
-        "📸 Отправьте дополнительные фото (новый цвет) для этой модели, затем нажмите **«✅ ВСЕ ФОТО ЗАГРУЖЕНЫ»**.",
-        reply_markup=build_keyboard(["✅ ВСЕ ФОТО ЗАГРУЖЕНЫ", "❌ Отмена"], 1),
+        tr_str(lang, "ask_add_color"),
+        reply_markup=build_keyboard([tr_str(lang, "btn_all_loaded"), tr_str(lang, "btn_cancel")], 1),
         parse_mode="Markdown",
     )
 
 
 @dp.callback_query(F.data.startswith("del_"))
 async def cb_delete_collage(callback: CallbackQuery):
+    lang = get_lang(callback.from_user.id, callback.from_user.language_code)
     short_id = callback.data.split("_", 1)[1]
     folder_path = pending_dispatches.pop(short_id, None)
     if folder_path:
@@ -687,16 +995,17 @@ async def cb_delete_collage(callback: CallbackQuery):
         except Exception:
             pass
     persist_store()
-    await callback.answer("Удалено")
-    await callback.message.edit_text("🗑 Коллажи удалены.")
+    await callback.answer(tr_str(lang, "deleted_toast"))
+    await callback.message.edit_text(tr_str(lang, "deleted_msg"))
 
 
 @dp.message()
 async def catch_all_unhandled(message: Message, state: FSMContext):
     if await state.get_state() is None:
+        lang = get_lang(message.from_user.id, message.from_user.language_code)
         await message.answer(
-            "🌸 **PÎVOK Cloud Studio**\nНажмите **«🖼 Создать коллаж»** внизу (или отправьте фото прямо сюда):",
-            reply_markup=build_keyboard(MAIN_MENU, 1),
+            tr_str(lang, "catch_all"),
+            reply_markup=main_menu_kb(lang),
             parse_mode="Markdown",
         )
 
@@ -745,6 +1054,7 @@ async def health():
     return {
         "status": "ok",
         "service": "PIVOK Cloud Studio 24/7",
+        "languages": ["ru", "tr"],
         "webhook_mode": PUBLIC_BASE_URL.startswith("https://"),
     }
 
@@ -838,6 +1148,7 @@ async def save_editor_data(folder_name: str, request: Request):
     data = await request.json()
     crop_data = data.get("images", [])
     chat_id = data.get("chat_id")
+    lang = data.get("lang")
     folder_path = os.path.join(INCOMING_DIR, folder_name)
     if not os.path.isdir(folder_path):
         raise HTTPException(status_code=404, detail="Incoming folder not found")
@@ -847,5 +1158,5 @@ async def save_editor_data(folder_name: str, request: Request):
 
     await asyncio.to_thread(collage_engine.generate_folder_collages, folder_name, folder_path)
     if chat_id:
-        asyncio.create_task(send_collage_preview(int(chat_id), folder_name))
+        asyncio.create_task(send_collage_preview(int(chat_id), folder_name, lang=lang))
     return {"status": "ok"}
