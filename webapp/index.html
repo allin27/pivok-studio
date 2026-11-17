@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>PÎVOK — Редактор Коллажа</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="/webapp/fabric.min.js"></script>
+    <style>
+        body { margin: 0; padding: 0; background: #1c1c1d; color: white; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; overflow: hidden; }
+        .header { width: 100%; padding: 12px 0; text-align: center; background: #5d0537; color: #d6a474; font-size: 16px; font-weight: bold; border-bottom: 1px solid #7c1850; letter-spacing: 0.5px; }
+        .instruction { font-size: 12px; color: #a1a1aa; padding: 8px 12px; text-align: center; }
+        #canvas-container { position: relative; box-shadow: 0 4px 18px rgba(0,0,0,0.6); border-radius: 10px; overflow: hidden; margin-top: 4px; }
+        .controls { padding: 12px; display: flex; gap: 10px; justify-content: center; width: 100%; flex-wrap: wrap; box-sizing: border-box; }
+        button { padding: 11px 18px; border-radius: 10px; border: none; background: #5d0537; color: #f5d8b8; font-weight: bold; font-size: 14px; cursor: pointer; transition: 0.2s; }
+        button:active { opacity: 0.85; }
+        button.secondary { background: #3a3a3c; color: white; }
+        .hidden { display: none !important; }
+        .slider-container { width: 90%; max-width: 400px; display: flex; flex-direction: column; align-items: center; margin-top: 10px; }
+        .slider-label { font-size: 12px; color: #d6a474; margin-bottom: 5px; }
+        input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 20px; width: 20px; border-radius: 50%; background: #d6a474; cursor: pointer; margin-top: -8px; }
+        input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 4px; cursor: pointer; background: #3a3a3c; border-radius: 2px; }
+    </style>
+</head>
+<body>
+    <div class="header" id="pair-info">PÎVOK — Загрузка...</div>
+    <div class="instruction">Нажмите на фото, двигайте пальцем и меняйте масштаб ползунком.</div>
+
+    <div id="canvas-container">
+        <canvas id="c"></canvas>
+    </div>
+
+    <div class="slider-container" id="zoom-controls" style="display: none;">
+        <div class="slider-label">Масштаб выбранного фото</div>
+        <input type="range" id="zoom-slider" min="0.05" max="1.5" step="0.005" value="0.2">
+    </div>
+
+    <div class="controls">
+        <button id="btn-prev" class="secondary hidden">⬅️ Назад</button>
+        <button id="btn-swap" class="secondary hidden">⇄ Поменять местами</button>
+        <button id="btn-next" class="hidden">Далее ➡️</button>
+    </div>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.expand();
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const folder = urlParams.get('folder');
+        const chatId = urlParams.get('chat_id');
+
+        let canvas = new fabric.Canvas('c', { selection: false, preserveObjectStacking: true });
+        let editorData = null;
+        let currentPairIndex = parseInt(urlParams.get('pair') || '0', 10);
+        let pairs = [];
+        let finalImages = [];
+
+        let bgImgObj = null;
+        let photoObjs = [];
+        let activePhoto = null;
+        let globalScale = 1;
+
+        async function init() {
+            try {
+                const res = await fetch(`/api/editor/${encodeURIComponent(folder)}`);
+                if (!res.ok) throw new Error("Не удалось загрузить исходники");
+                editorData = await res.json();
+
+                const photos = editorData.photos;
+                const names = editorData.photo_names;
+                let photoObjects = [];
+                for (let i = 0; i < photos.length; i++) {
+                    photoObjects.push({ data: photos[i], name: names[i] });
+                }
+
+                if (editorData.is_single) {
+                    for (let i = 0; i < photoObjects.length; i++) pairs.push([photoObjects[i]]);
+                } else {
+                    for (let i = 0; i < photoObjects.length; i += 2) pairs.push(photoObjects.slice(i, i + 2));
+                }
+
+                if (currentPairIndex >= pairs.length) currentPairIndex = 0;
+
+                fabric.Image.fromURL(editorData.bg_data, function(img) {
+                    const maxWidth = Math.min(window.innerWidth * 0.92, 460);
+                    const maxHeight = window.innerHeight - 235;
+                    globalScale = Math.min(maxWidth / img.width, maxHeight / img.height);
+
+                    canvas.setWidth(img.width * globalScale);
+                    canvas.setHeight(img.height * globalScale);
+
+                    bgImgObj = img;
+                    bgImgObj.scale(globalScale);
+                    bgImgObj.set({ left: 0, top: 0, selectable: false, evented: false });
+
+                    renderPair(currentPairIndex);
+                });
+            } catch (e) {
+                document.getElementById('pair-info').innerText = "Ошибка: " + e.message;
+            }
+        }
+
+        function renderPair(index) {
+            currentPairIndex = index;
+            document.getElementById('pair-info').innerText = `PÎVOK — Коллаж ${index + 1} из ${pairs.length}`;
+            canvas.clear();
+            photoObjs = [];
+
+            const pairPhotos = pairs[index];
+            const config = editorData.config;
+
+            const bgRect = new fabric.Rect({
+                left: 0, top: 0, width: canvas.width, height: canvas.height,
+                fill: 'white', selectable: false, evented: false
+            });
+            canvas.add(bgRect);
+
+            let loadedCount = 0;
+            const totalToLoad = editorData.is_single ? 1 : ((pairPhotos[0] ? 1 : 0) + (pairPhotos[1] ? 1 : 0));
+
+            function onPhotoLoaded() {
+                loadedCount++;
+                if (loadedCount === totalToLoad) {
+                    canvas.add(bgImgObj);
+                    if (photoObjs.length > 0) setActivePhoto(photoObjs[0]);
+                }
+            }
+
+            if (editorData.is_single) {
+                addPhoto(pairPhotos[0], config.rects.MAIN, "MAIN", onPhotoLoaded);
+            } else {
+                if (pairPhotos[0]) addPhoto(pairPhotos[0], config.rects.LEFT, "LEFT", onPhotoLoaded);
+                if (pairPhotos[1]) addPhoto(pairPhotos[1], config.rects.RIGHT, "RIGHT", onPhotoLoaded);
+            }
+
+            document.getElementById('btn-prev').classList.toggle('hidden', index === 0);
+            document.getElementById('btn-next').classList.toggle('hidden', index === pairs.length - 1);
+            document.getElementById('btn-swap').classList.toggle('hidden', !!editorData.is_single);
+        }
+
+        function addPhoto(b64_obj, rect, name, cb) {
+            const b64 = typeof b64_obj === 'string' ? b64_obj : b64_obj.data;
+            const filename = typeof b64_obj === 'string' ? null : b64_obj.name;
+            fabric.Image.fromURL(b64, function(img) {
+                const cw = rect[2] - rect[0];
+                const ch = rect[3] - rect[1];
+                const baseScale = Math.max(cw / img.width, ch / img.height);
+                const finalScale = baseScale * globalScale;
+
+                img.set({
+                    left: (rect[0] + cw / 2) * globalScale,
+                    top: (rect[1] + ch / 2) * globalScale,
+                    originX: 'center',
+                    originY: 'center',
+                    scaleX: finalScale,
+                    scaleY: finalScale,
+                    hasControls: false,
+                    hasBorders: true,
+                    borderColor: '#d6a474',
+                    borderScaleFactor: 2,
+                    padding: 0
+                });
+
+                img.clipPath = new fabric.Rect({
+                    left: rect[0] * globalScale,
+                    top: rect[1] * globalScale,
+                    width: cw * globalScale,
+                    height: ch * globalScale,
+                    absolutePositioned: true
+                });
+
+                img.clipRect = rect;
+                img.rectName = name;
+                img.customMinScale = finalScale * 0.65;
+                img.customMaxScale = finalScale * 2.8;
+                img.filename = filename;
+
+                photoObjs.push(img);
+                canvas.add(img);
+                cb();
+            });
+        }
+
+        function setActivePhoto(img) {
+            activePhoto = img;
+            canvas.setActiveObject(img);
+            const slider = document.getElementById('zoom-slider');
+            document.getElementById('zoom-controls').style.display = 'flex';
+            slider.min = img.customMinScale;
+            slider.max = img.customMaxScale;
+            slider.step = (img.customMaxScale - img.customMinScale) / 200;
+            slider.value = img.scaleX;
+        }
+
+        canvas.on('mouse:down', function(opt) {
+            if (opt.target && photoObjs.includes(opt.target)) {
+                setActivePhoto(opt.target);
+            }
+        });
+
+        document.getElementById('zoom-slider').addEventListener('input', function(e) {
+            if (activePhoto) {
+                const scale = parseFloat(e.target.value);
+                activePhoto.scale(Math.max(scale, activePhoto.customMinScale));
+                canvas.renderAll();
+            }
+        });
+
+        document.getElementById('btn-prev').onclick = () => {
+            saveCurrentPair();
+            if (currentPairIndex > 0) renderPair(currentPairIndex - 1);
+        };
+
+        document.getElementById('btn-next').onclick = () => {
+            saveCurrentPair();
+            if (currentPairIndex < pairs.length - 1) renderPair(currentPairIndex + 1);
+        };
+
+        document.getElementById('btn-swap').onclick = () => {
+            if (pairs[currentPairIndex].length === 2) {
+                const temp = pairs[currentPairIndex][0];
+                pairs[currentPairIndex][0] = pairs[currentPairIndex][1];
+                pairs[currentPairIndex][1] = temp;
+                renderPair(currentPairIndex);
+            }
+        };
+
+        function saveCurrentPair() {
+            let cropData = {};
+            for (let i = 0; i < photoObjs.length; i++) {
+                let img = photoObjs[i];
+                cropData[img.rectName] = {
+                    filename: img.filename,
+                    left: img.left / globalScale,
+                    top: img.top / globalScale,
+                    scaleX: img.scaleX / globalScale,
+                    scaleY: img.scaleY / globalScale,
+                    width: img.width,
+                    height: img.height,
+                    clipLeft: img.clipRect[0],
+                    clipTop: img.clipRect[1]
+                };
+            }
+            finalImages[currentPairIndex] = cropData;
+        }
+
+        tg.MainButton.setText("СОХРАНИТЬ КОЛЛАЖ");
+        tg.MainButton.color = "#5d0537";
+        tg.MainButton.show();
+
+        tg.MainButton.onClick(async () => {
+            saveCurrentPair();
+            for (let i = 0; i < pairs.length; i++) {
+                if (!finalImages[i]) {
+                    renderPair(i);
+                    saveCurrentPair();
+                }
+            }
+
+            tg.MainButton.setText("Сохранение...");
+            tg.MainButton.showProgress();
+
+            await fetch(`/api/editor/${encodeURIComponent(folder)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ images: finalImages, chat_id: chatId })
+            });
+
+            tg.MainButton.hideProgress();
+            tg.close();
+        });
+
+        init();
+    </script>
+</body>
+</html>
