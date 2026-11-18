@@ -1,7 +1,7 @@
 import logging
+from typing import Optional
 import cv2
 import numpy as np
-import yolo_local
 
 COLOR_DICT_BGR = {
     "SIYAH": (30, 30, 30),
@@ -25,125 +25,130 @@ COLOR_DICT_BGR = {
 }
 
 
-def get_pixels_from_image(image_bytes: bytes):
+def extract_dominant_lab_from_pose(small_bgr: np.ndarray, pose_data: Optional[dict]) -> Optional[np.ndarray]:
+    """
+    Extracts dominant garment LAB color from the person's torso/dress region
+    using already-computed YOLOv8-pose keypoints/boxes (zero extra neural net calls!).
+    """
     try:
-        np_arr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        if img is None:
+        if small_bgr is None or small_bgr.size == 0:
             return None
-        max_dim = 640
-        h, w = img.shape[:2]
-        if max(h, w) > max_dim:
-            scale = max_dim / max(h, w)
-            img = cv2.resize(img, (int(w * scale), int(h * scale)))
-            h, w = img.shape[:2]
+        h, w = small_bgr.shape[:2]
+        roi = None
 
-        pixels = None
-        yolo_data = yolo_local.detect_yolo(img, "yolov8n-seg")
+        if pose_data and pose_data.get("boxes"):
+            boxes = pose_data["boxes"]
+            best_i = max(
+                range(len(boxes)),
+                key=lambda i: (boxes[i]["xyxy"][2] - boxes[i]["xyxy"][0])
+                * (boxes[i]["xyxy"][3] - boxes[i]["xyxy"][1]),
+            )
+            x1, y1, x2, y2 = map(int, boxes[best_i]["xyxy"])
+            bw, bh = max(1, x2 - x1), max(1, y2 - y1)
 
-        if yolo_data and yolo_data.get("boxes"):
-            person_indices = [i for i, b in enumerate(yolo_data["boxes"]) if int(b["cls"]) == 0]
-            if person_indices:
-                best_i = max(
-                    person_indices,
-                    key=lambda i: (yolo_data["boxes"][i]["xyxy"][2] - yolo_data["boxes"][i]["xyxy"][0])
-                    * (yolo_data["boxes"][i]["xyxy"][3] - yolo_data["boxes"][i]["xyxy"][1]),
-                )
-                x1, y1, x2, y2 = map(int, yolo_data["boxes"][best_i]["xyxy"])
-                if yolo_data.get("masks") and best_i < len(yolo_data["masks"]):
-                    poly = np.array(yolo_data["masks"][best_i], np.int32)
-                    mask = np.zeros((h, w), dtype=np.uint8)
-                    cv2.fillPoly(mask, [poly], 1)
+            # Use shoulder-to-knee/hip torso band if keypoints available
+            cx1, cx2 = x1 + int(bw * 0.24), x2 - int(bw * 0.24)
+            cy1, cy2 = y1 + int(bh * 0.24), y2 - int(bh * 0.16)
 
-                    bw, bh = x2 - x1, y2 - y1
-                    crop_x1, crop_x2 = max(0, x1 + int(bw * 0.15)), min(w, x2 - int(bw * 0.15))
-                    crop_y1, crop_y2 = max(0, y1 + int(bh * 0.25)), min(h, y2 - int(bh * 0.10))
+            if pose_data.get("keypoints") and best_i < len(pose_data["keypoints"]):
+                kps = pose_data["keypoints"][best_i]
+                if len(kps) >= 13:
+                    sh_ys = [kps[idx][1] for idx in (5, 6) if kps[idx][1] > 5]
+                    hip_ys = [kps[idx][1] for idx in (11, 12, 13, 14) if kps[idx][1] > 5]
+                    sh_xs = [kps[idx][0] for idx in (5, 6) if kps[idx][0] > 5]
+                    if sh_ys:
+                        cy1 = max(y1, int(max(sh_ys) + bh * 0.03))
+                    if hip_ys:
+                        cy2 = min(y2, int(max(hip_ys)))
+                    if len(sh_xs) == 2:
+                        lx, rx = min(sh_xs), max(sh_xs)
+                        pad = max(4, int((rx - lx) * 0.10))
+                        if rx - lx > 18:
+                            cx1, cx2 = int(lx + pad), int(rx - pad)
 
-                    crop_mask = np.zeros((h, w), dtype=bool)
-                    if crop_x2 > crop_x1 and crop_y2 > crop_y1:
-                        crop_mask[crop_y1:crop_y2, crop_x1:crop_x2] = True
-                    else:
-                        crop_mask[y1:y2, x1:x2] = True
+            cx1, cx2 = max(0, cx1), min(w, cx2)
+            cy1, cy2 = max(0, cy1), min(h, cy2)
+            if cx2 - cx1 >= 8 and cy2 - cy1 >= 8:
+                roi = small_bgr[cy1:cy2, cx1:cx2]
 
-                    valid_pixels = img[(mask > 0) & crop_mask]
-                    if len(valid_pixels) > 0:
-                        pixels = np.float32(valid_pixels)
+        if roi is None or roi.size == 0:
+            roi = small_bgr[int(h * 0.30) : int(h * 0.70), int(w * 0.38) : int(w * 0.62)]
 
-        if pixels is None or len(pixels) == 0:
-            cropped = img[int(h * 0.3) : int(h * 0.7), int(w * 0.4) : int(w * 0.6)]
-            pixels = np.float32(cropped.reshape(-1, 3))
-        return pixels
-    except Exception as e:
-        logging.error(f"Error in get_pixels_from_image: {e}")
-        return None
+        # Subsample to max ~1600 pixels so K-Means takes < 1 ms!
+        if roi.shape[0] > 45 or roi.shape[1] > 45:
+            roi = cv2.resize(roi, (min(40, roi.shape[1]), min(40, roi.shape[0])))
 
+        pixels = np.float32(roi.reshape(-1, 3))
+        if len(pixels) < 10:
+            return None
 
-def extract_color_features(image_bytes: bytes):
-    pixels = get_pixels_from_image(image_bytes)
-    if pixels is None or len(pixels) < 10:
-        return None
-    try:
         n_colors = 3
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 150, 0.1)
-        _, labels, palette = cv2.kmeans(pixels, n_colors, None, criteria, 8, cv2.KMEANS_RANDOM_CENTERS)
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 60, 0.2)
+        _, labels, palette = cv2.kmeans(pixels, n_colors, None, criteria, 4, cv2.KMEANS_PP_CENTERS)
         _, counts = np.unique(labels, return_counts=True)
 
-        valid_clusters = []
-        total_pixels = sum(counts)
+        best_lab = None
+        best_weight = -1.0
+        total_pixels = float(sum(counts))
         for i in range(n_colors):
             bgr = palette[i]
             weight = counts[i] / total_pixels
             b, g, r = bgr
             if r > g > b and r > 60 and (r - g) > 15:
-                weight *= 0.1
-            pixel = np.uint8([[bgr]])
-            lab_pixel = cv2.cvtColor(pixel, cv2.COLOR_BGR2LAB)[0][0]
-            valid_clusters.append(
-                {"lab": np.array([lab_pixel[0], lab_pixel[1], lab_pixel[2]], dtype=np.float32), "weight": weight}
-            )
-        return valid_clusters
+                weight *= 0.12  # Skin-tone penalty
+            lab_px = cv2.cvtColor(np.uint8([[bgr]]), cv2.COLOR_BGR2LAB)[0][0].astype(np.float32)
+            if weight > best_weight:
+                best_weight = weight
+                best_lab = lab_px
+        return best_lab
     except Exception as e:
-        logging.error(f"Error in extract_color_features: {e}")
+        logging.error(f"Error in extract_dominant_lab_from_pose: {e}")
         return None
 
 
-def _nearest_color_name(lab: np.ndarray) -> str:
+def nearest_color_name(lab: Optional[np.ndarray]) -> str:
     if lab is None:
         return "COLOR"
     best_name, best_dist = "COLOR", float("inf")
     for name, bgr in COLOR_DICT_BGR.items():
         lab2 = cv2.cvtColor(np.uint8([[list(bgr)]]), cv2.COLOR_BGR2LAB)[0][0].astype(np.float32)
-        dist = float(np.sqrt(0.5 * (lab[0] - lab2[0]) ** 2 + (lab[1] - lab2[1]) ** 2 + (lab[2] - lab2[2]) ** 2))
+        dist = float(
+            np.sqrt(0.5 * (lab[0] - lab2[0]) ** 2 + (lab[1] - lab2[1]) ** 2 + (lab[2] - lab2[2]) ** 2)
+        )
         if dist < best_dist:
             best_dist, best_name = dist, name
     return best_name
 
 
-def cluster_photos_by_color(photo_list):
-    if not photo_list:
+def cluster_analyzed_items(items: list[dict]):
+    """
+    items: [{'temp_path': ..., 'ext': ..., 'score': float, 'lab': list|np.ndarray|None, 'pose': dict}, ...]
+    Returns: (pairs, labels)
+    """
+    if not items:
         return [], []
 
-    features = []
-    for p in photo_list:
-        clusters = extract_color_features(p["bytes"])
-        if clusters:
-            dominant = max(clusters, key=lambda x: x["weight"])
-            features.append({"photo": p, "lab": dominant["lab"]})
-        else:
-            features.append({"photo": p, "lab": None})
+    pool = []
+    for it in items:
+        lab = it.get("lab")
+        if lab is not None and not isinstance(lab, np.ndarray):
+            lab = np.array(lab, dtype=np.float32)
+        pool.append({"item": it, "lab": lab})
 
     pairs, labels = [], []
-    while len(features) >= 2:
+    while len(pool) >= 2:
         min_dist, best_pair = float("inf"), (0, 1)
-        for i in range(len(features)):
-            for j in range(i + 1, len(features)):
-                lab1, lab2 = features[i]["lab"], features[j]["lab"]
+        for i in range(len(pool)):
+            for j in range(i + 1, len(pool)):
+                lab1, lab2 = pool[i]["lab"], pool[j]["lab"]
                 if lab1 is not None and lab2 is not None:
                     base_dist = np.sqrt(
-                        0.5 * (lab1[0] - lab2[0]) ** 2 + (lab1[1] - lab2[1]) ** 2 + (lab1[2] - lab2[2]) ** 2
+                        0.5 * (lab1[0] - lab2[0]) ** 2
+                        + (lab1[1] - lab2[1]) ** 2
+                        + (lab1[2] - lab2[2]) ** 2
                     )
-                    s1 = features[i]["photo"].get("score", 0.0)
-                    s2 = features[j]["photo"].get("score", 0.0)
+                    s1 = pool[i]["item"].get("score", 0.0)
+                    s2 = pool[j]["item"].get("score", 0.0)
                     dist = base_dist - 5.0 * abs(s1 - s2)
                 else:
                     dist = 9999.0
@@ -151,15 +156,15 @@ def cluster_photos_by_color(photo_list):
                     min_dist, best_pair = dist, (i, j)
 
         i, j = best_pair
-        p1, p2 = features[i]["photo"], features[j]["photo"]
-        dom_lab = features[i]["lab"]
+        p1, p2 = pool[i]["item"], pool[j]["item"]
+        dom_lab = pool[i]["lab"]
         pairs.append([p1, p2] if p1.get("score", -999.0) >= p2.get("score", -999.0) else [p2, p1])
-        labels.append(_nearest_color_name(dom_lab))
-        features.pop(j)
-        features.pop(i)
+        labels.append(nearest_color_name(dom_lab))
+        pool.pop(j)
+        pool.pop(i)
 
-    if features:
-        pairs.append([features[0]["photo"]])
-        labels.append(_nearest_color_name(features[0]["lab"]))
+    if pool:
+        pairs.append([pool[0]["item"]])
+        labels.append(nearest_color_name(pool[0]["lab"]))
 
     return pairs, labels

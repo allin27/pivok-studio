@@ -1,11 +1,13 @@
 """
-PÎVOK Studio — 24/7 Cloud App (Render / Docker, RU + TR Bilingual)
-Unified FastAPI + Aiogram 3 Bot + WebApp Crop Editor + Embedded YOLOv8 ONNX CPU
+PÎVOK Studio — 24/7 Cloud App (Render Free-Tier Optimized: <150MB RAM, 1-Thread ONNX, RU + TR)
 """
 
 import asyncio
 import base64
+import collections
+import gc
 import hashlib
+import io
 import json
 import logging
 import os
@@ -39,6 +41,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from PIL import Image, ImageOps
 
 import collage_engine
 import color_clustering
@@ -79,7 +82,8 @@ SIZE_LIST = [
 ]
 
 PHOTO_BUFFER: Dict[int, dict] = {}
-DOWNLOAD_PREFETCH: Dict[str, asyncio.Task] = {}
+_SEEN_UPDATES = collections.deque(maxlen=300)
+_GEN_LOCK = asyncio.Lock()
 
 # ==========================================
 # RU + TR LOCALIZATION DICTIONARY
@@ -136,7 +140,9 @@ STRINGS = {
         "ask_edit_size": "📏 Выберите или введите новые **Размеры**:",
         "ask_edit_price": "💰 Введите новую **Цену ($)**:",
         "choose_below": "Выберите кнопку внизу 👇",
-        "generating": "⚙️ Собираю коллажи PÎVOK (4×3) в облаке...",
+        "generating": "⚙️ Начинаю обработку {n} фото в облаке...",
+        "prog_step": "⏳ Анализ фото: **{cur} из {tot}**...",
+        "prog_render": "🎨 Сборка коллажей PÎVOK (4×3)...",
         "preview_ready": (
             "✨ **PÎVOK — Коллажи готовы ({n} шт.)**\n"
             "🔖 Код: `{code}` | 💰 Цена: `{price}$` | 📏 Размеры: `{sizes}`\n\n"
@@ -146,7 +152,7 @@ STRINGS = {
         "err_gen": "❌ Ошибка при создании коллажей: {e}",
         "folder_missing": "⚠️ Папка с готовыми коллажами не найдена.",
         "gen_empty": "⚠️ Не удалось сгенерировать коллажи.",
-        "sending_originals": "Отправляю оригиналы 2160×2880...",
+        "sending_originals": "Отправляю оригиналы...",
         "refreshing": "Обновляю превью...",
         "ask_add_color": "📸 Отправьте дополнительные фото (новый цвет) для этой модели, затем нажмите **«✅ ВСЕ ФОТО ЗАГРУЖЕНЫ»**.",
         "deleted_toast": "Удалено",
@@ -203,7 +209,9 @@ STRINGS = {
         "ask_edit_size": "📏 Yeni **Beden aralığını** seçin veya yazın:",
         "ask_edit_price": "💰 Yeni **Fiyatı ($)** girin:",
         "choose_below": "Lütfen aşağıdaki butonlardan birini seçin 👇",
-        "generating": "⚙️ PÎVOK kolajları (4×3) bulutta hazırlanıyor...",
+        "generating": "⚙️ {n} fotoğraf bulutta işleniyor...",
+        "prog_step": "⏳ Fotoğraf analizi: **{cur} / {tot}**...",
+        "prog_render": "🎨 PÎVOK kolajları (4×3) birleştiriliyor...",
         "preview_ready": (
             "✨ **PÎVOK — Kolajlar hazır ({n} adet)**\n"
             "🔖 Kod: `{code}` | 💰 Fiyat: `{price}$` | 📏 Beden: `{sizes}`\n\n"
@@ -213,7 +221,7 @@ STRINGS = {
         "err_gen": "❌ Kolaj oluşturulurken hata oluştu: {e}",
         "folder_missing": "⚠️ Kolaj klasörü bulunamadı.",
         "gen_empty": "⚠️ Kolaj oluşturulamadı.",
-        "sending_originals": "2160×2880 orijinal dosyalar gönderiliyor...",
+        "sending_originals": "Orijinal dosyalar gönderiliyor...",
         "refreshing": "Önizleme yenileniyor...",
         "ask_add_color": "📸 Bu model için ek fotoğrafları (yeni renk) gönderin, ardından **«✅ TÜM FOTOĞRAFLAR YÜKLENDİ»** butonuna basın.",
         "deleted_toast": "Silindi",
@@ -224,15 +232,7 @@ STRINGS = {
 
 CREATE_TEXTS = {STRINGS["ru"]["btn_create"], STRINGS["tr"]["btn_create"]}
 LANG_BTN_TEXTS = {STRINGS["ru"]["btn_lang"], STRINGS["tr"]["btn_lang"]}
-CANCEL_TEXTS = {
-    "❌ Отмена",
-    "Отмена",
-    "❌ İptal",
-    "İptal",
-    "iptal",
-    "/cancel",
-    "/stop",
-}
+CANCEL_TEXTS = {"❌ Отмена", "Отмена", "❌ İptal", "İptal", "iptal", "/cancel", "/stop"}
 DONE_PHOTO_TEXTS = {
     STRINGS["ru"]["btn_all_loaded"],
     STRINGS["tr"]["btn_all_loaded"],
@@ -287,6 +287,23 @@ def persist_store():
     _save_state_store(_STORE)
 
 
+def prune_old_work_folders(keep_latest: int = 8):
+    for base_d in (INCOMING_DIR, OUTPUT_DIR):
+        try:
+            if not os.path.isdir(base_d):
+                continue
+            entries = [
+                (os.path.getmtime(os.path.join(base_d, d)), os.path.join(base_d, d))
+                for d in os.listdir(base_d)
+                if os.path.isdir(os.path.join(base_d, d))
+            ]
+            entries.sort(reverse=True)
+            for _, old_path in entries[keep_latest:]:
+                shutil.rmtree(old_path, ignore_errors=True)
+        except Exception:
+            pass
+
+
 def get_lang(user_id: Optional[int], tg_lang_code: Optional[str] = None) -> str:
     if user_id is not None:
         saved = user_langs.get(str(user_id))
@@ -331,51 +348,70 @@ def lang_inline_kb() -> InlineKeyboardMarkup:
     )
 
 
-def analyze_full_body(img_bytes: bytes) -> float:
-    try:
-        arr = np.frombuffer(img_bytes, np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if img is None:
-            return 0.0
-        h, w = img.shape[:2]
-        if max(h, w) > 640:
-            sc = 640.0 / max(h, w)
-            img = cv2.resize(img, (int(w * sc), int(h * sc)))
-            h, w = img.shape[:2]
+def _save_and_analyze_one_sync(raw_bytes: bytes, dest_path: str) -> dict:
+    """
+    Saves photo to disk (capping max dimension to 1920px so memory stays tiny),
+    runs YOLOv8-pose ONCE, and extracts both full-body score & dominant LAB color.
+    """
+    with Image.open(io.BytesIO(raw_bytes)) as im:
+        im_rgb = ImageOps.exif_transpose(im).convert("RGB")
+        if max(im_rgb.width, im_rgb.height) > 1920:
+            im_rgb.thumbnail((1920, 1920), Image.Resampling.BILINEAR)
+        im_rgb.save(dest_path, "JPEG", quality=90)
 
-        data = yolo_local.detect_yolo(img, "yolov8n-pose")
-        kps_all = data.get("keypoints", [])
-        if kps_all:
-            kps = kps_all[0]
-            if len(kps) >= 17:
-                if any(5 < kps[idx][0] < w - 5 and 5 < kps[idx][1] < h - 5 for idx in (15, 16)):
-                    return 2.0
-                if any(5 < kps[idx][0] < w - 5 and 5 < kps[idx][1] < h - 5 for idx in (13, 14)):
-                    return 0.5
-                return -1.0
-    except Exception:
-        pass
-    return 0.0
+        max_dim = 640
+        if max(im_rgb.width, im_rgb.height) > max_dim:
+            sc = max_dim / float(max(im_rgb.width, im_rgb.height))
+            small_rgb = im_rgb.resize(
+                (max(1, int(im_rgb.width * sc)), max(1, int(im_rgb.height * sc))),
+                Image.Resampling.BILINEAR,
+            )
+        else:
+            small_rgb = im_rgb.copy()
+
+    small_bgr = np.array(small_rgb)[:, :, ::-1]
+    del small_rgb
+    sh, sw = small_bgr.shape[:2]
+
+    pose_data = yolo_local.detect_yolo(small_bgr, "yolov8n-pose")
+
+    score = 0.0
+    kps_all = pose_data.get("keypoints", [])
+    if kps_all and len(kps_all[0]) >= 17:
+        kps = kps_all[0]
+        if any(5 < kps[idx][0] < sw - 5 and 5 < kps[idx][1] < sh - 5 for idx in (15, 16)):
+            score = 2.0
+        elif any(5 < kps[idx][0] < sw - 5 and 5 < kps[idx][1] < sh - 5 for idx in (13, 14)):
+            score = 0.5
+        else:
+            score = -1.0
+
+    lab = color_clustering.extract_dominant_lab_from_pose(small_bgr, pose_data)
+    del small_bgr
+    gc.collect()
+
+    return {
+        "temp_path": dest_path,
+        "ext": "jpg",
+        "score": score,
+        "lab": lab.tolist() if lab is not None else None,
+        "pose": pose_data,
+    }
 
 
-async def download_single_photo(f_id: str, bot_inst: Bot) -> dict:
-    if f_id in DOWNLOAD_PREFETCH:
-        try:
-            return await DOWNLOAD_PREFETCH[f_id]
-        except Exception:
-            DOWNLOAD_PREFETCH.pop(f_id, None)
-
+async def download_and_analyze_photo(f_id: str, dest_path: str, bot_inst: Bot) -> dict:
     for attempt in range(3):
         try:
             file_info = await asyncio.wait_for(bot_inst.get_file(f_id), timeout=20.0)
-            ext = file_info.file_path.split(".")[-1] if "." in file_info.file_path else "jpg"
             downloaded = await asyncio.wait_for(bot_inst.download_file(file_info.file_path), timeout=45.0)
-            img_bytes = downloaded.read()
-            score = await asyncio.to_thread(analyze_full_body, img_bytes)
-            return {"file_id": f_id, "bytes": img_bytes, "ext": ext, "score": score}
+            raw_bytes = downloaded.read()
+            del downloaded
+            res = await asyncio.to_thread(_save_and_analyze_one_sync, raw_bytes, dest_path)
+            del raw_bytes
+            return res
         except Exception as e:
-            logger.error(f"Error downloading {f_id} (attempt {attempt + 1}): {e}")
-            await asyncio.sleep(0.3)
+            logger.error(f"Error downloading/analyzing {f_id} (attempt {attempt + 1}): {e}")
+            await asyncio.sleep(0.4)
     raise RuntimeError(f"Download failed: {f_id}")
 
 
@@ -594,9 +630,6 @@ async def handle_incoming_photo(message: Message, state: FSMContext):
     if await state.get_state() is None:
         await state.set_state(CollageForm.photo)
 
-    if file_id not in DOWNLOAD_PREFETCH:
-        DOWNLOAD_PREFETCH[file_id] = asyncio.create_task(download_single_photo(file_id, bot))
-
     chat_id = message.chat.id
     if chat_id not in PHOTO_BUFFER:
         PHOTO_BUFFER[chat_id] = {"ids": [], "task": None, "lang": lang}
@@ -664,30 +697,50 @@ async def handle_all_photos_loaded(message: Message, state: FSMContext):
         os.makedirs(inc_folder, exist_ok=True)
         wait_m = await message.answer(tr_str(lang, "processing_extra"), reply_markup=ReplyKeyboardRemove())
 
-        downloaded = await asyncio.gather(*(download_single_photo(fid, bot) for fid in photo_ids))
-        for fid in photo_ids:
-            DOWNLOAD_PREFETCH.pop(fid, None)
+        async with _GEN_LOCK:
+            pose_cache_path = os.path.join(inc_folder, "pose_cache.json")
+            pose_cache = {}
+            if os.path.exists(pose_cache_path):
+                try:
+                    with open(pose_cache_path, "r", encoding="utf-8") as pf:
+                        pose_cache = json.load(pf)
+                except Exception:
+                    pass
 
-        existing = [f for f in os.listdir(inc_folder) if f.lower().endswith((".jpg", ".jpeg", ".png"))]
-        next_idx = (len(existing) // 2) + 1
+            existing = [f for f in os.listdir(inc_folder) if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+            next_idx = (len(existing) // 2) + 1
 
-        if len(downloaded) >= 2:
-            pairs, labels = await asyncio.to_thread(color_clustering.cluster_photos_by_color, downloaded)
-            for p_idx, pair in enumerate(pairs):
-                if len(pair) < 2:
-                    continue
-                lbl = labels[p_idx] if p_idx < len(labels) else "COLOR"
-                prefix = f"{next_idx + p_idx:02d}_{lbl}"
-                for k, item in enumerate(pair, 1):
-                    with open(os.path.join(inc_folder, f"{prefix}-{k}.{item['ext']}"), "wb") as f:
-                        f.write(item["bytes"])
-            await asyncio.to_thread(collage_engine.generate_folder_collages, folder_name, inc_folder)
-        else:
-            out_folder = os.path.join(OUTPUT_DIR, folder_name)
-            os.makedirs(out_folder, exist_ok=True)
-            item = downloaded[0]
-            with open(os.path.join(out_folder, f"{next_idx:02d}_EXTRA.{item['ext']}"), "wb") as f:
-                f.write(item["bytes"])
+            analyzed = []
+            for idx, fid in enumerate(photo_ids, 1):
+                tmp_p = os.path.join(inc_folder, f"__raw_extra_{idx}.tmpjpg")
+                item = await download_and_analyze_photo(fid, tmp_p, bot)
+                analyzed.append(item)
+                await asyncio.sleep(0.04)
+
+            if len(analyzed) >= 2:
+                pairs, labels = await asyncio.to_thread(color_clustering.cluster_analyzed_items, analyzed)
+                for p_idx, pair in enumerate(pairs):
+                    if len(pair) < 2:
+                        for leftover in pair:
+                            try:
+                                os.remove(leftover["temp_path"])
+                            except Exception:
+                                pass
+                        continue
+                    lbl = labels[p_idx] if p_idx < len(labels) else "COLOR"
+                    prefix = f"{next_idx + p_idx:02d}_{lbl}"
+                    for k, it in enumerate(pair, 1):
+                        final_name = f"{prefix}-{k}.jpg"
+                        final_path = os.path.join(inc_folder, final_name)
+                        os.replace(it["temp_path"], final_path)
+                        pose_cache[final_name] = it["pose"]
+                with open(pose_cache_path, "w", encoding="utf-8") as pf:
+                    json.dump(pose_cache, pf)
+                await asyncio.to_thread(collage_engine.generate_folder_collages, folder_name, inc_folder)
+            else:
+                out_folder = os.path.join(OUTPUT_DIR, folder_name)
+                os.makedirs(out_folder, exist_ok=True)
+                shutil.move(analyzed[0]["temp_path"], os.path.join(out_folder, f"{next_idx:02d}_EXTRA.jpg"))
 
         await state.clear()
         try:
@@ -844,6 +897,8 @@ async def handle_confirm(message: Message, state: FSMContext):
         return
 
     data = await state.get_data()
+    await state.clear()
+
     chat_id = message.chat.id
     photo_ids = data.get("photo_ids", [])
     is_single = data.get("is_single", False)
@@ -855,37 +910,80 @@ async def handle_confirm(message: Message, state: FSMContext):
     cat_tag = "ОДИНАРНЫЙ" if is_single else "ПЛАТЬЕ"
     folder_name = f"PIVOK_{cat_tag}_{safe_code}_{safe_size}_{safe_price}_{int(time.time())}"
     inc_folder = os.path.join(INCOMING_DIR, folder_name)
+
+    prune_old_work_folders(keep_latest=8)
     os.makedirs(inc_folder, exist_ok=True)
 
-    prog_msg = await message.answer(tr_str(lang, "generating"), reply_markup=ReplyKeyboardRemove())
+    prog_msg = await message.answer(
+        tr_str(lang, "generating", n=len(photo_ids)),
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
     try:
-        downloaded = await asyncio.gather(*(download_single_photo(fid, bot) for fid in photo_ids))
-        for fid in photo_ids:
-            DOWNLOAD_PREFETCH.pop(fid, None)
+        async with _GEN_LOCK:
+            analyzed = []
+            tot = len(photo_ids)
+            last_edit_t = time.time()
 
-        if is_single:
-            for idx, item in enumerate(downloaded, 1):
-                with open(os.path.join(inc_folder, f"{idx:02d}_COLOR-{idx}.{item['ext']}"), "wb") as f:
-                    f.write(item["bytes"])
-        else:
-            if grouping_mode == "smart":
-                pairs, labels = await asyncio.to_thread(color_clustering.cluster_photos_by_color, downloaded)
+            for idx, fid in enumerate(photo_ids, 1):
+                tmp_p = os.path.join(inc_folder, f"__raw_{idx:03d}.tmpjpg")
+                item = await download_and_analyze_photo(fid, tmp_p, bot)
+                analyzed.append(item)
+
+                now_t = time.time()
+                if now_t - last_edit_t >= 2.0 or idx == tot:
+                    last_edit_t = now_t
+                    try:
+                        await prog_msg.edit_text(
+                            tr_str(lang, "prog_step", cur=idx, tot=tot),
+                            parse_mode="Markdown",
+                        )
+                    except Exception:
+                        pass
+                await asyncio.sleep(0.04)
+
+            pose_cache = {}
+            if is_single:
+                for idx, it in enumerate(analyzed, 1):
+                    final_name = f"{idx:02d}_COLOR-{idx}.jpg"
+                    os.replace(it["temp_path"], os.path.join(inc_folder, final_name))
+                    pose_cache[final_name] = it["pose"]
             else:
-                pairs = [downloaded[i : i + 2] for i in range(0, len(downloaded), 2)]
-                labels = [f"COLOR{idx + 1}" for idx in range(len(pairs))]
+                if grouping_mode == "smart":
+                    pairs, labels = await asyncio.to_thread(color_clustering.cluster_analyzed_items, analyzed)
+                else:
+                    pairs = [analyzed[i : i + 2] for i in range(0, len(analyzed), 2)]
+                    labels = [f"COLOR{idx + 1}" for idx in range(len(pairs))]
 
-            for p_idx, pair in enumerate(pairs):
-                if len(pair) < 2:
-                    continue
-                lbl = labels[p_idx] if p_idx < len(labels) else f"COLOR{p_idx + 1}"
-                prefix = f"{p_idx + 1:02d}_{lbl}"
-                for k, item in enumerate(pair, 1):
-                    with open(os.path.join(inc_folder, f"{prefix}-{k}.{item['ext']}"), "wb") as f:
-                        f.write(item["bytes"])
+                for p_idx, pair in enumerate(pairs):
+                    if len(pair) < 2:
+                        for leftover in pair:
+                            try:
+                                os.remove(leftover["temp_path"])
+                            except Exception:
+                                pass
+                        continue
+                    lbl = labels[p_idx] if p_idx < len(labels) else f"COLOR{p_idx + 1}"
+                    prefix = f"{p_idx + 1:02d}_{lbl}"
+                    for k, it in enumerate(pair, 1):
+                        final_name = f"{prefix}-{k}.jpg"
+                        os.replace(it["temp_path"], os.path.join(inc_folder, final_name))
+                        pose_cache[final_name] = it["pose"]
 
-        await asyncio.to_thread(collage_engine.generate_folder_collages, folder_name, inc_folder)
-        await state.clear()
+            with open(os.path.join(inc_folder, "pose_cache.json"), "w", encoding="utf-8") as pf:
+                json.dump(pose_cache, pf)
+
+            del analyzed
+            gc.collect()
+
+            try:
+                await prog_msg.edit_text(tr_str(lang, "prog_render"))
+            except Exception:
+                pass
+
+            await asyncio.to_thread(collage_engine.generate_folder_collages, folder_name, inc_folder)
+            gc.collect()
+
         try:
             await prog_msg.delete()
         except Exception:
@@ -898,7 +996,6 @@ async def handle_confirm(message: Message, state: FSMContext):
         )
     except Exception as e:
         logger.exception("Error generating collages")
-        await state.clear()
         await bot.send_message(
             chat_id,
             tr_str(lang, "err_gen", e=str(e)),
@@ -1054,6 +1151,7 @@ async def health():
     return {
         "status": "ok",
         "service": "PIVOK Cloud Studio 24/7",
+        "version": "v2-lowram",
         "languages": ["ru", "tr"],
         "webhook_mode": PUBLIC_BASE_URL.startswith("https://"),
     }
@@ -1067,6 +1165,11 @@ async def telegram_webhook(request: Request):
     if sec != WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="Invalid secret token")
     payload = await request.json()
+    upd_id = payload.get("update_id")
+    if upd_id is not None:
+        if upd_id in _SEEN_UPDATES:
+            return {"ok": True}
+        _SEEN_UPDATES.append(upd_id)
     update = Update.model_validate(payload, context={"bot": bot})
     asyncio.create_task(dp.feed_update(bot, update))
     return {"ok": True}
@@ -1156,7 +1259,9 @@ async def save_editor_data(folder_name: str, request: Request):
     with open(os.path.join(folder_path, "manual_crop.json"), "w", encoding="utf-8") as f:
         json.dump(crop_data, f, ensure_ascii=False)
 
-    await asyncio.to_thread(collage_engine.generate_folder_collages, folder_name, folder_path)
+    async with _GEN_LOCK:
+        await asyncio.to_thread(collage_engine.generate_folder_collages, folder_name, folder_path)
+        gc.collect()
     if chat_id:
         asyncio.create_task(send_collage_preview(int(chat_id), folder_name, lang=lang))
     return {"status": "ok"}

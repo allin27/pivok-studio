@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .env
 deploy_to_hf.py
+work_data/
